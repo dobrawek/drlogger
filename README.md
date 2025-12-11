@@ -6,12 +6,12 @@
 [![GitHub](https://img.shields.io/badge/GitHub-drlogger--library-blue?logo=github)](https://github.com/dronlinepl/drlogger-library)
 
 A powerful **Kotlin Multiplatform logging library** designed for cross-platform applications. DR-Logger provides a
-flexible, listener-based logging architecture with platform-specific implementations for Android, iOS, JVM, macOS, and
-Linux.
+flexible, listener-based logging architecture with platform-specific implementations for Android, iOS, JVM, macOS,
+Linux, and Windows.
 
 ## Features
 
-- **Multiplatform Support**: Single codebase for Android, iOS, JVM, macOS, and Linux
+- **Multiplatform Support**: Single codebase for Android, iOS, JVM, macOS, Linux, and Windows
 - **Flexible Listener Architecture**: Route log messages to multiple outputs simultaneously
 - **Multiple Log Levels**: DEBUG, TRACE, INFO, WARN, ERROR, FATAL with configurable filtering
 - **Asynchronous Processing**: Non-blocking log delivery using Kotlin coroutines
@@ -22,6 +22,7 @@ Linux.
     - JVM: Apache Log4j support
     - Linux: Systemd logging support
     - iOS/macOS: Native platform logging
+    - Windows: Windows Event Log integration
 - **Built-in Listeners**:
     - Console output with emoji indicators
     - Daily rotating file logs with automatic cleanup
@@ -164,6 +165,20 @@ Install required system dependencies:
 sudo apt install libsystemd-dev gcc-multilib
 ```
 
+### Windows
+
+No additional setup required. Use `LogcatLogListener` to write to Windows Event Log.
+View logs using Event Viewer (`eventvwr.msc`) under "Windows Logs" -> "Application":
+
+```kotlin
+DrLogger.addListener(LogcatLogListener().apply { enabled = true })
+```
+
+Log levels are mapped to Event Log types:
+- ERROR -> Error
+- WARN -> Warning
+- INFO/DEBUG/TRACE -> Information
+
 ### iOS/macOS
 
 No additional setup required. Native platform logging is automatically configured.
@@ -177,6 +192,7 @@ No additional setup required. Native platform logging is automatically configure
 | JVM      | `jvm`                                     | Java 8+              |
 | macOS    | `macosArm64`, `macosX64`                  | macOS 10.13+         |
 | Linux    | `linuxX64`, `linuxArm64`                  | glibc 2.27+          |
+| Windows  | `mingwX64`                                | Windows 7+           |
 
 ## Architecture
 
@@ -232,6 +248,7 @@ calling thread.
 - **iOS/macOS targets** can only be built on macOS with Xcode installed
 - **Android targets** require Android SDK
 - **Linux targets** can be built on any platform but require libsystemd-dev for native features
+- **Windows targets** can be built on any platform using MinGW toolchain
 
 
 ## License
