@@ -42,6 +42,9 @@ kotlin {
     linuxX64()
     linuxArm64()
 
+    // Windows targets
+    mingwX64()
+
     sourceSets {
         val commonMain by getting {
             dependencies {
@@ -90,7 +93,8 @@ artifactory {
                 "macosArm64",
                 "macosX64",
                 "linuxX64",
-                "linuxArm64"
+                "linuxArm64",
+                "mingwX64"
             )
             setPublishArtifacts(true)
         }
