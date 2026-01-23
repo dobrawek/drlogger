@@ -194,8 +194,8 @@ internal object DrLoggerFactory {
         // tryEmit is non-blocking and returns false if buffer is full
         if (!_events.tryEmit(logMessage)) {
             // Log dropped message in debug mode
-            val timestamp = now()//          .toString("HH:mm:ss.SSS")
-            println("[${timestamp}] Warning: Log message delayed due to buffer overflow: ${logMessage.type}")
+            //val timestamp = now()//          .toString("HH:mm:ss.SSS")
+            //println("[${timestamp}] Warning: Log message delayed due to buffer overflow: ${logMessage.type}")
             listenerScope.launch {
                 _events.emit(logMessage)
             }

@@ -7,38 +7,120 @@
 
 package pl.dronline.utils.log.listener
 
+import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import pl.dronline.utils.datetime.toString
+import pl.dronline.utils.filesystem.FileSize
+import pl.dronline.utils.filesystem.FileSystem
+import pl.dronline.utils.filesystem.mkdirs
+import pl.dronline.utils.log.ALogListener
+import pl.dronline.utils.log.DrLoggerFactory.prepareMessage
 import pl.dronline.utils.log.ILogListener
+import pl.dronline.utils.log.consoleError
+import kotlin.time.Clock
+import kotlin.time.Duration.Companion.days
 import kotlin.time.ExperimentalTime
 import kotlin.time.Instant
 
 /**
- * A log listener implementation that writes log messages to daily rotating log files.
- * This listener creates a new log file each day, organizing logs chronologically
- * while preventing individual log files from growing too large.
- *
- * Features:
- * - Daily log rotation
- * - Automatic cleanup of old log files on startup
- * - Maximum file count limit
- * - Maximum file age limit
- *
- * This is an expect class that is implemented differently on each supported platform,
- * as file handling is platform-specific.
+ * Base implementation of daily file log listener.
+ * Use [DailyFileLogListener] for the public API.
  */
 @OptIn(ExperimentalTime::class)
-@Suppress("EXPECT_ACTUAL_CLASSIFIERS_ARE_IN_BETA_WARNING")
-expect class DailyFileLogListener() : ILogListener {
+open class BaseDailyFileLogListener : ALogListener("DailyFileLogListener"), ILogListener {
+    private val _path = atomic<String?>(null)
+    private val _rotationFailedForFile = atomic<String?>(null)
+
+    var path: String?
+        get() = _path.value
+        set(value) {
+            value?.let { mkdirs(it) }
+            _path.value = value
+        }
+
+    var namePrefix: String = ""
+    var maxFileCount: Int = 30
+    var maxFileAgeDays: Int = 90
+    var maxFileSize: FileSize? = null
+
+    private val filename: String?
+        get() {
+            val basePath = _path.value ?: return null
+            val dateStr = Clock.System.now().toString("yyyyMMdd")
+            val baseFilename = "$namePrefix$dateStr"
+
+            val mainFileName = "$baseFilename.log"
+            val mainFilePath = FileSystem.joinPath(basePath, mainFileName)
+
+            val maxSize = maxFileSize?.bytes
+            if (maxSize == null) {
+                return mainFilePath
+            }
+
+            // Rotation already failed for this file today - don't try again
+            if (_rotationFailedForFile.value == baseFilename) {
+                return mainFilePath
+            }
+
+            val mainSize = FileSystem.getFileSize(mainFilePath)
+            if (mainSize < 0 || mainSize < maxSize) {
+                return mainFilePath
+            }
+
+            // Nginx-style rotation: rotate existing files and always write to main file
+            if (!rotateFiles(basePath, baseFilename)) {
+                _rotationFailedForFile.value = baseFilename
+                writeLog(
+                    timestamp = Clock.System.now(),
+                    level = ILogListener.Level.WARN,
+                    type = name,
+                    message = "File rotation failed for $baseFilename, size limit will be exceeded",
+                    t = null
+                )
+            }
+            return mainFilePath
+        }
+
     /**
-     * Writes a log message to the current day's log file.
+     * Nginx-style rotation:
+     * - app.log → app.1.log
+     * - app.1.log → app.2.log
+     * - app.2.log → app.3.log
+     * - etc.
      *
-     * @param timestamp The time when the log event occurred
-     * @param level The severity level of the log message
-     * @param type The tag or category of the log message
-     * @param message The content of the log message
-     * @param t Optional throwable associated with the log message
+     * @return true if rotation succeeded, false if main file rename failed
      */
+    private fun rotateFiles(basePath: String, baseFilename: String): Boolean {
+        // Find highest existing index
+        var highestIndex = 0
+        while (true) {
+            val nextIndex = highestIndex + 1
+            val indexedPath = FileSystem.joinPath(basePath, "$baseFilename.$nextIndex.log")
+            if (FileSystem.getFileSize(indexedPath) < 0) {
+                break
+            }
+            highestIndex = nextIndex
+        }
+
+        // Rotate from highest to lowest: .N → .N+1, ..., .1 → .2
+        for (i in highestIndex downTo 1) {
+            val fromPath = FileSystem.joinPath(basePath, "$baseFilename.$i.log")
+            val toPath = FileSystem.joinPath(basePath, "$baseFilename.${i + 1}.log")
+            FileSystem.renameFile(fromPath, toPath)
+        }
+
+        // Rotate main file: app.log → app.1.log
+        val mainPath = FileSystem.joinPath(basePath, "$baseFilename.log")
+        val firstIndexPath = FileSystem.joinPath(basePath, "$baseFilename.1.log")
+        return FileSystem.renameFile(mainPath, firstIndexPath)
+    }
+
+    private val canBeUsed: Boolean
+        get() {
+            val dir = _path.value ?: return false
+            return FileSystem.canWrite(dir)
+        }
 
     override fun writeLog(
         timestamp: Instant,
@@ -46,69 +128,108 @@ expect class DailyFileLogListener() : ILogListener {
         type: String,
         message: String,
         t: Throwable?
-    )
+    ) {
+        runCatching {
+            if (canBeUsed) {
+                val logMessage = buildString {
+                    append(timestamp.toString("HH:mm:ss.SSS"))
+                    append(" [")
+                    append(level.name)
+                    append("] ")
+                    append(prepareMessage(type, message, t))
+                }
 
-    /**
-     * The name of this log listener instance
-     */
+                filename?.let { path ->
+                    FileSystem.appendToFile(path, logMessage)
+                }
+            }
+        }.onFailure {
+            consoleError("CAN NOT WRITE: $level $type $message")
+        }
+    }
+
+    override fun onStart() {
+        performCleanup()
+    }
+
+    fun performCleanup() {
+        val logDirPath = _path.value ?: return
+
+        runCatching {
+            val pattern = Regex("^${Regex.escape(namePrefix)}\\d{8}(\\.\\d+)?\\.log$")
+            val logFiles = FileSystem.listFiles(logDirPath)
+                .filter { pattern.matches(it.name) }
+                .sortedBy { it.modifiedTime }
+
+            if (logFiles.isEmpty()) return
+
+            val now = Clock.System.now()
+            val cutoffTime = now - maxFileAgeDays.days
+
+            val filesToDelete = mutableListOf<String>()
+            val remainingFiles = logFiles.toMutableList()
+
+            remainingFiles.forEach { file ->
+                if (file.modifiedTime < cutoffTime) {
+                    filesToDelete.add(file.name)
+                }
+            }
+            remainingFiles.removeAll { filesToDelete.contains(it.name) }
+
+            if (remainingFiles.size > maxFileCount) {
+                val countToDelete = remainingFiles.size - maxFileCount
+                filesToDelete.addAll(remainingFiles.take(countToDelete).map { it.name })
+            }
+
+            filesToDelete.forEach { fileName ->
+                val filePath = FileSystem.joinPath(logDirPath, fileName)
+                runCatching {
+                    if (FileSystem.deleteFile(filePath)) {
+                        consoleError("Deleted old log file: $fileName")
+                    }
+                }.onFailure { e ->
+                    consoleError("Failed to delete log file $fileName: ${e.message}")
+                }
+            }
+        }.onFailure { e ->
+            consoleError("Error during log cleanup: ${e.message}")
+        }
+    }
+}
+
+/**
+ * A log listener implementation that writes log messages to daily rotating log files.
+ *
+ * Features:
+ * - Daily log rotation
+ * - Automatic cleanup of old log files on startup
+ * - Maximum file count limit
+ * - Maximum file age limit
+ * - Optional size-based rolling within a day (nginx-style)
+ *
+ * When size-based rolling is enabled (maxFileSize is not null), files use nginx-style rotation:
+ * - `prefix20250123.log` - current file (always newest)
+ * - `prefix20250123.1.log` - previous file
+ * - `prefix20250123.2.log` - older file
+ * - etc. (higher index = older file)
+ */
+@OptIn(ExperimentalTime::class)
+@Suppress("EXPECT_ACTUAL_CLASSIFIERS_ARE_IN_BETA_WARNING")
+expect class DailyFileLogListener() : ILogListener {
     override val name: String
-
-    /**
-     * Controls whether this log listener is active and processing log messages
-     */
     override var enabled: Boolean
-
-    /**
-     * The minimum log level this listener will process
-     * Messages with a lower level will be ignored
-     */
     override var minLevel: ILogListener.Level
-
-    /**
-     * Optional regex pattern to filter log messages by content
-     * Only messages matching this pattern will be processed
-     */
     override var messageRegex: Regex?
-
-    /**
-     * Optional regex pattern to filter log messages by tag
-     * Only messages with tags matching this pattern will be processed
-     */
     override var tagRegex: Regex?
 
-    /**
-     * The directory path where log files will be stored
-     * If null, a default platform-specific location will be used
-     */
     var path: String?
-
-    /**
-     * The prefix to be added to log filenames
-     * The full filename format will be: [namePrefix]YYYY-MM-DD.log
-     */
     var namePrefix: String
-
-    /**
-     * Maximum number of log files to retain.
-     * Older files will be deleted when this limit is exceeded.
-     * Default: 30 (approximately 1 month of daily logs)
-     */
     var maxFileCount: Int
-
-    /**
-     * Maximum age of log files in days.
-     * Files older than this will be deleted.
-     * Default: 90 days
-     */
     var maxFileAgeDays: Int
+    var maxFileSize: FileSize?
 
+    override fun writeLog(timestamp: Instant, level: ILogListener.Level, type: String, message: String, t: Throwable?)
     override fun startListening(scope: CoroutineScope): Job
-
     override fun stopListening()
-
-    /**
-     * Manually trigger cleanup of old log files.
-     * This is called automatically on startup, but can also be triggered manually if needed.
-     */
     fun performCleanup()
 }

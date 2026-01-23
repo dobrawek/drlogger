@@ -1,7 +1,9 @@
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import pl.dronline.utils.filesystem.kB
 import pl.dronline.utils.log.DrLogger
 import pl.dronline.utils.log.ILogListener
+import pl.dronline.utils.log.listener.DailyFileLogListener
 import pl.dronline.utils.log.listener.EmojiConsoleLogListener
 import kotlin.test.Test
 
@@ -49,6 +51,7 @@ class DrLoggerTest {
         }
     }
 
+
     @Test
     fun test3() {
         runBlocking {
@@ -81,6 +84,37 @@ class DrLoggerTest {
             logger.e("ABCD.100.102", Exception("EX ERROR"), "Error test log exception with Exception")
 
             delay(1000)
+        }
+    }
+
+    @Test
+    fun testFileRolling() {
+        runBlocking {
+            val fileListener = DailyFileLogListener().apply {
+                path = "/tmp/log/test/test2"
+                namePrefix = "test-"
+                maxFileSize = 10.kB  // 10 KB - small for quick rolling
+                maxFileAgeDays = 7
+                maxFileCount = 100
+                enabled = true
+            }
+
+            DrLogger.addListener(fileListener)
+
+            val logger = DrLogger("ROLLING_TEST")
+
+            // Write ~500KB of data to trigger multiple rolls
+            repeat(5000) { i ->
+                logger.info("Log message number $i - padding to make it longer: ${"-".repeat(50)}")
+                if (i % 500 == 0) {
+                    println("Written $i messages...")
+                }
+            }
+
+            delay(2000)  // Wait for async processing
+
+            println("Done! Check /tmp/dupa for rolled files.")
+            println("Expected: test-YYYYMMDD.log, test-YYYYMMDD.1.log, test-YYYYMMDD.2.log, etc.")
         }
     }
 }

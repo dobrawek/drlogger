@@ -25,31 +25,10 @@ Linux, and Windows.
     - Windows: Windows Event Log integration
 - **Built-in Listeners**:
     - Console output with emoji indicators
-    - Daily rotating file logs with automatic cleanup
-    - Platform-specific system loggers
+    - Daily rotating file logs with automatic cleanup and size-based rotation
+    - Syslog integration (Linux/macOS → syslog, Windows → Event Log)
+    - Platform-specific system loggers (Logcat, Log4j, Event Log)
 
-## Installation
-
-### Building from Source
-
-Currently, DR-Logger is best used by building from source and publishing to your local Maven repository:
-
-```bash
-git clone https://github.com/dronlinepl/drlogger-library.git
-cd drlogger-library
-```
-
-Then add the dependency to your `build.gradle.kts`:
-
-```kotlin
-repositories {
-    mavenLocal()
-}
-
-dependencies {
-    implementation("pl.dronline.multiplatform.utils:drlogger-library:1.0.+")
-}
-```
 ## Quick Start
 
 ### Basic Usage
@@ -113,16 +92,25 @@ DrLogger.addListener(CustomLogListener().apply { enabled = true })
 
 ```kotlin
 import pl.dronline.utils.log.listener.DailyFileLogListener
-import java.io.File
 
-val fileListener = DailyFileLogListener(
-    logDir = File("/path/to/logs"),
-    filePrefix = "app",
-    maxDays = 7  // Keep logs for 7 days
-).apply { enabled = true }
+val fileListener = DailyFileLogListener().apply {
+    path = "/path/to/logs"   // Directory is created automatically if it doesn't exist
+    namePrefix = "app-"      // Log files: app-20250123.log
+    maxFileCount = 30        // Keep max 30 files
+    maxFileAgeDays = 90      // Delete files older than 90 days
+    maxFileSize = 10.MB      // Optional: 10MB max per file (nginx-style rotation)
+    enabled = true
+}
 
 DrLogger.addListener(fileListener)
 ```
+
+When `maxFileSize` is set, files rotate nginx-style within a day:
+- `app-20250123.log` - current file (always newest)
+- `app-20250123.1.log` - previous file
+- `app-20250123.2.log` - older file
+
+Available size units: `10.bytes`, `500.kB`, `10.MB`, `1.GB`
 
 ### Filtering
 
@@ -165,17 +153,34 @@ Install required system dependencies:
 sudo apt install libsystemd-dev gcc-multilib
 ```
 
+Use `SyslogLogListener` for system logging:
+
+```kotlin
+DrLogger.addListener(SyslogLogListener(
+    ident = "myapp",
+    facility = SyslogFacility.USER
+).apply { enabled = true })
+```
+
+View logs with: `journalctl -t myapp` or `tail -f /var/log/syslog`
+
 ### Windows
 
-No additional setup required. Use `LogcatLogListener` to write to Windows Event Log.
+No additional setup required. Use `LogcatLogListener` or `SyslogLogListener` to write to Windows Event Log.
+Both delegate to `EventLogLogListener` internally.
+
 View logs using Event Viewer (`eventvwr.msc`) under "Windows Logs" -> "Application":
 
 ```kotlin
+// Using LogcatLogListener (default source: "DrLogger")
 DrLogger.addListener(LogcatLogListener().apply { enabled = true })
+
+// Or using SyslogLogListener with custom source name
+DrLogger.addListener(SyslogLogListener(ident = "MyApp").apply { enabled = true })
 ```
 
 Log levels are mapped to Event Log types:
-- ERROR -> Error
+- FATAL/ERROR -> Error
 - WARN -> Warning
 - INFO/DEBUG/TRACE -> Information
 
@@ -257,8 +262,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Authors
 
-- **DR-ONLINE SP. Z O.O.** - Copyright (c) 2017-2025
-- **Przemysław Dobrowolski** - Copyright (c) 2017-2025
+- **DR-ONLINE SP. Z O.O.** - Copyright (c) 2017-2026
+- **Przemysław Dobrowolski** - Copyright (c) 2017-2026
 
 ## Acknowledgments
 

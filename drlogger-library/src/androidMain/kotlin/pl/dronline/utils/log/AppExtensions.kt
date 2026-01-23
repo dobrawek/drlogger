@@ -28,5 +28,7 @@ fun Application.enableLogcat() {
 fun Application.enableDailyFileLog(
     path: String
 ) {
-    DrLogger.addListener(DailyFileLogListener(this))
+    DrLogger.addListener(DailyFileLogListener(this).apply {
+        this.path = path
+    })
 }

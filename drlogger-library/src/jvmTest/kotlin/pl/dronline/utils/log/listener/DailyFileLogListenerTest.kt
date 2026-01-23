@@ -1,6 +1,8 @@
 package pl.dronline.utils.log.listener
 
 import kotlinx.coroutines.runBlocking
+import pl.dronline.utils.datetime.toString
+import pl.dronline.utils.filesystem.bytes
 import pl.dronline.utils.log.ILogListener
 import java.io.File
 import java.nio.file.Files
@@ -184,6 +186,177 @@ class DailyFileLogListenerTest {
         assertFalse(logFile.exists(), "Log file should be deleted")
         assertTrue(otherFile.exists(), "Non-log file should not be deleted")
         assertTrue(wrongPrefixFile.exists(), "File with wrong prefix should not be deleted")
+    }
+
+    @Test
+    fun `should roll file when maxFileSize exceeded`() {
+        // Given
+        listener.maxFileSize = 100.bytes // 100 bytes limit
+
+        println("\n=== Test: Roll file when size exceeded ===")
+
+        // Write enough data to exceed the limit
+        repeat(10) { i ->
+            listener.writeLog(
+                timestamp = Clock.System.now(),
+                level = ILogListener.Level.INFO,
+                type = "TEST",
+                message = "Message number $i with some padding to make it longer",
+                t = null
+            )
+        }
+
+        // Then
+        val logFiles = tempDir.listFiles { file ->
+            file.name.startsWith("test-") && file.name.endsWith(".log")
+        }?.sortedBy { it.name }
+
+        println("Found log files: ${logFiles?.size ?: 0}")
+        logFiles?.forEach { file ->
+            println("  - ${file.name} (${file.length()} bytes)")
+        }
+
+        assertNotNull(logFiles)
+        assertTrue(logFiles.size >= 2, "Should have created at least 2 files due to size rolling")
+    }
+
+    @Test
+    fun `should create indexed files in sequence`() {
+        // Given
+        listener.maxFileSize = 50.bytes // Very small limit to force multiple rolls
+
+        println("\n=== Test: Create indexed files in sequence ===")
+
+        // Write enough data to create multiple files
+        repeat(20) { i ->
+            listener.writeLog(
+                timestamp = Clock.System.now(),
+                level = ILogListener.Level.INFO,
+                type = "TEST",
+                message = "Message $i",
+                t = null
+            )
+        }
+
+        // Then
+        val logFiles = tempDir.listFiles { file ->
+            file.name.startsWith("test-") && file.name.endsWith(".log")
+        }?.sortedBy { it.name }
+
+        println("Found log files: ${logFiles?.size ?: 0}")
+        logFiles?.forEach { file ->
+            println("  - ${file.name} (${file.length()} bytes)")
+        }
+
+        assertNotNull(logFiles)
+        assertTrue(logFiles.size >= 2, "Should have multiple files")
+
+        // Verify naming convention
+        val today = Clock.System.now().toString("yyyyMMdd")
+        assertTrue(logFiles.any { it.name == "test-$today.log" }, "Main file should exist")
+        assertTrue(logFiles.any { it.name == "test-$today.1.log" }, "First indexed file should exist")
+    }
+
+    @Test
+    fun `should cleanup indexed files based on age`() {
+        // Given
+        listener.maxFileAgeDays = 5
+        listener.maxFileSize = 100.bytes // Enable size rolling
+
+        // Create old indexed files
+        val oldMainFile = createLogFile("test-20240101.log", 10)
+        val oldIndexedFile1 = createLogFile("test-20240101.1.log", 10)
+        val oldIndexedFile2 = createLogFile("test-20240101.2.log", 10)
+        val recentFile = createLogFile("test-20240201.log", 2)
+
+        println("\n=== Test: Cleanup indexed files based on age ===")
+        println("Created files:")
+        println("  - ${oldMainFile.name} (10 days old)")
+        println("  - ${oldIndexedFile1.name} (10 days old)")
+        println("  - ${oldIndexedFile2.name} (10 days old)")
+        println("  - ${recentFile.name} (2 days old)")
+
+        // When
+        listener.performCleanup()
+
+        // Then
+        println("\nAfter cleanup:")
+        println("  - ${oldMainFile.name} exists: ${oldMainFile.exists()}")
+        println("  - ${oldIndexedFile1.name} exists: ${oldIndexedFile1.exists()}")
+        println("  - ${oldIndexedFile2.name} exists: ${oldIndexedFile2.exists()}")
+        println("  - ${recentFile.name} exists: ${recentFile.exists()}")
+
+        assertFalse(oldMainFile.exists(), "Old main file should be deleted")
+        assertFalse(oldIndexedFile1.exists(), "Old indexed file 1 should be deleted")
+        assertFalse(oldIndexedFile2.exists(), "Old indexed file 2 should be deleted")
+        assertTrue(recentFile.exists(), "Recent file should still exist")
+    }
+
+    @Test
+    fun `should cleanup indexed files based on count`() {
+        // Given
+        listener.maxFileCount = 3
+        listener.maxFileAgeDays = 999 // Don't delete based on age
+        listener.maxFileSize = 100.bytes // Enable size rolling
+
+        println("\n=== Test: Cleanup indexed files based on count ===")
+
+        // Create files (including indexed ones) - 5 total
+        val files = listOf(
+            createLogFile("test-20240101.log", 5),
+            createLogFile("test-20240101.1.log", 5),
+            createLogFile("test-20240102.log", 4),
+            createLogFile("test-20240103.log", 3),
+            createLogFile("test-20240103.1.log", 3)
+        )
+
+        println("Created ${files.size} files:")
+        files.forEach { println("  - ${it.name}") }
+
+        // When
+        listener.performCleanup()
+
+        // Then
+        val remainingFiles = tempDir.listFiles { file ->
+            file.name.startsWith("test-") && file.name.endsWith(".log")
+        }
+
+        println("\nAfter cleanup - remaining files: ${remainingFiles?.size ?: 0}")
+        remainingFiles?.forEach { println("  - ${it.name}") }
+
+        assertEquals(3, remainingFiles?.size ?: 0, "Should keep only 3 files")
+    }
+
+    @Test
+    fun `should not roll when maxFileSize is null`() {
+        // Given
+        listener.maxFileSize = null // Disabled (default)
+
+        println("\n=== Test: No rolling when maxFileSize is null ===")
+
+        // Write many messages
+        repeat(50) { i ->
+            listener.writeLog(
+                timestamp = Clock.System.now(),
+                level = ILogListener.Level.INFO,
+                type = "TEST",
+                message = "Message number $i with some extra padding to make it longer",
+                t = null
+            )
+        }
+
+        // Then
+        val logFiles = tempDir.listFiles { file ->
+            file.name.startsWith("test-") && file.name.endsWith(".log")
+        }
+
+        println("Found log files: ${logFiles?.size ?: 0}")
+        logFiles?.forEach { file ->
+            println("  - ${file.name} (${file.length()} bytes)")
+        }
+
+        assertNotNull(logFiles)
+        assertEquals(1, logFiles.size, "Should have only one file when size rolling is disabled")
     }
 
     @Test
